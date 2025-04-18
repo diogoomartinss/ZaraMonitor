@@ -7,9 +7,9 @@ import asyncio
 import logging
 import requests
 from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.firefox.options import Options
 from bs4 import BeautifulSoup
+import time
 
 logging.basicConfig(level=logging.INFO)
 discord_logger = logging.getLogger('Discord')
@@ -96,27 +96,28 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = ZaraBot(command_prefix='!', intents=intents)
 
+
 def get_item_name(url):
     options = Options()
     options.add_argument('--headless') 
-    options.add_argument('--no-sandbox')
-    options.add_argument('--disable-dev-shm-usage')
-    options.add_argument('--disable-gpu')
-    options.add_argument('--remote-debugging-port=9222')
 
-    service = Service('/usr/local/bin/chromedriver')
+    driver = webdriver.Firefox(options=options)
 
-    driver = webdriver.Chrome(service=service, options=options) 
-    driver.get(url)
+    try:
+        driver.get(url)
+        time.sleep(3) 
 
-    html = driver.page_source
-    soup = BeautifulSoup(html, "html.parser")
+        html = driver.page_source
+        soup = BeautifulSoup(html, "html.parser")
 
-    product_name = soup.find("h1", class_="product-detail-info__header-name")
-
-    driver.quit()
-
-    return product_name.text.strip()
+        product_name = soup.find("h1", class_="product-detail-info__header-name")
+        if product_name:
+            return product_name.text.strip()
+        else:
+            return "Product name not found"
+    
+    finally:
+        driver.quit()
 
 
 @bot.tree.command(name="monitor", description="Start monitoring a Zara product")
