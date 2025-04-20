@@ -3,7 +3,6 @@ import json
 import urllib
 import logging
 import asyncio
-import requests
 
 logger = logging.getLogger('monitor')
 
@@ -14,14 +13,14 @@ class ZaraMonitor:
         self.previous_stock = {}
         self.URL = URL
         self.product_id = self.extract_product_id(URL)
-        self.country_id = self.getStoreID()
+        self.country_id = self.get_store_ID()
         self.stock_URL = f"https://www.zara.com/itxrest/1/catalog/store/{self.country_id}/product/id/{self.product_id}/availability"
         self.session = None
         self._session_lock = asyncio.Lock()
         self.size_mapping = {} 
         self.product_name = product_name
 
-    def getStoreID(self):
+    def get_store_ID(self):
         with open("config.json", "r") as f:
             config = json.load(f)
 
@@ -42,7 +41,7 @@ class ZaraMonitor:
         """Initialize the monitor by fetching and storing the SKU-size mapping."""
         await self.ensure_session()
         await self._fetch_size_mapping()
-        
+
     async def _fetch_size_mapping(self):
         try:
             headers = {
@@ -51,9 +50,11 @@ class ZaraMonitor:
                 "Accept-Language": "en-US,en;q=0.9",
                 "Referer": "https://www.zara.com/pt/pt/vestido-midi-acetinado-p02452331.html?v1=431706812"
             }
-            response = requests.get(self.url, headers=headers)
-            response.raise_for_status()
-            data = response.json()
+
+            async with aiohttp.ClientSession(headers=headers) as session:
+                async with session.get(self.url) as response:
+                    response.raise_for_status()
+                    data = await response.json()
 
             products = data.get('recommendations', [])
 
@@ -73,11 +74,14 @@ class ZaraMonitor:
             print(f"Product '{self.product_name}' not found.")
             return None
 
+        except aiohttp.ClientResponseError as e:
+            print(f"Request Error: {e}")
+            return None
+        except aiohttp.ClientError as e:
+            print(f"Client Error: {e}")
+            return None
         except json.JSONDecodeError:
             print("Error: Invalid JSON format.")
-            return None
-        except requests.exceptions.RequestException as e:
-            print(f"Request Error: {e}")
             return None
         except Exception as e:
             print(f"An unexpected error occurred: {e}")

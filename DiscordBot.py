@@ -1,22 +1,24 @@
-import ZaraMonitor
+import zaraMonitor
 import json
 import discord
 from discord import app_commands
 from discord.ext import commands
 import asyncio
 import logging
-import requests
 from selenium import webdriver
 from selenium.webdriver.firefox.options import Options
 from bs4 import BeautifulSoup
 import time
+import os
 
 logging.basicConfig(level=logging.INFO)
 discord_logger = logging.getLogger('Discord')
 monitor_logger = logging.getLogger('Monitor Task')
 
+
+
 class MonitorTask:
-    def __init__(self, bot, channel_id, monitor, item_name, role, img_link):
+    def __init__(self, bot, channel_id, monitor, item_name, role, img_link, item_price):
         self.bot = bot
         self.channel_id = channel_id
         self.monitor = monitor
@@ -24,14 +26,14 @@ class MonitorTask:
         self.item_name = item_name
         self.role = role
         self.img_link = img_link
+        self.item_price = item_price
 
 
     async def run(self):
         try:
+            size_mapping = await self.monitor.get_sku_size_mapping()
             while True:
                 in_stock = await self.monitor.check_stock()
-                size_mapping = await self.monitor.get_sku_size_mapping()
-                print(size_mapping)
 
                 if self.monitor.has_stock_changed():
                     channel = self.bot.get_channel(self.channel_id)
@@ -51,8 +53,8 @@ class MonitorTask:
                             color=discord.Color.green()
                         )
                         embed.add_field(name="Product", value=self.monitor.URL, inline=False)
-                        embed.add_field(name="Status", value="In Stock" if in_stock else "Out of Stock", inline=False)
-                        embed.add_field(name="Current Stock", value=stock_info, inline=False)
+                        embed.add_field(name="Price", value=self.item_price, inline=False)
+                        embed.add_field(name="Sizes", value=stock_info, inline=False)
                         embed.set_image(url=self.img_link)
 
                         await channel.send(f'{self.role.mention}')
@@ -90,14 +92,71 @@ class ZaraBot(commands.Bot):
     async def on_ready(self):
         discord_logger.info(f'Logged on as {self.user}!')
         discord_logger.info('------')
+        await self.load_monitors()
 
+    def save_monitors(self):
+        data = []
+        for channel_id, monitors in self.monitors.items():
+            for i, monitor in enumerate(monitors):
+                task = self.monitor_tasks[channel_id][i]
+                data.append({
+                    "channel_id": channel_id,
+                    "url": monitor.URL,
+                    "item_name": task.item_name,
+                    "item_price": task.item_price,
+                    "role_id": task.role.id,
+                    "img_link": task.img_link
+                })
+
+        with open("monitors.json", "w") as f:
+            json.dump(data, f, indent=4)
+
+    async def load_monitors(self):
+        if not os.path.exists("monitors.json"):
+            return
+
+        try:
+            with open("monitors.json", "r") as f:
+                data = json.load(f)
+
+            for entry in data:
+                url = entry["url"]
+                item_name = entry["item_name"]
+                item_price = entry["item_price"]
+                role_id = entry["role_id"]
+                img_link = entry["img_link"]
+                channel_id = entry["channel_id"]
+
+                channel = self.get_channel(channel_id)
+                role = None
+                if channel and hasattr(channel, "guild"):
+                    role = channel.guild.get_role(role_id)
+
+                if not channel or not role:
+                    continue
+
+                monitor = zaraMonitor.ZaraMonitor(url, item_name)
+                await monitor.initialize()
+
+                if channel_id not in self.monitors:
+                    self.monitors[channel_id] = []
+                    self.monitor_tasks[channel_id] = []
+
+                self.monitors[channel_id].append(monitor)
+                task = MonitorTask(self, channel_id, monitor, item_name, role, img_link, item_price)
+                self.monitor_tasks[channel_id].append(task)
+
+                monitor_logger.info(f"Loaded monitor for {url} in channel {channel_id}")
+
+        except Exception as e:
+            discord_logger.error(f"Failed to load monitors from file: {e}")
 
 intents = discord.Intents.default()
 intents.message_content = True
 bot = ZaraBot(command_prefix='!', intents=intents)
 
 
-def get_item_name(url):
+def get_item_info(url):
     options = Options()
     options.add_argument('--headless') 
 
@@ -110,14 +169,23 @@ def get_item_name(url):
         html = driver.page_source
         soup = BeautifulSoup(html, "html.parser")
 
-        product_name = soup.find("h1", class_="product-detail-info__header-name")
-        if product_name:
-            return product_name.text.strip()
+        product_name_element = soup.find("h1", class_="product-detail-info__header-name")
+        if product_name_element:
+            product_name = product_name_element.text.strip()
         else:
-            return "Product name not found"
+            product_name = "Product name not found"
+
+        price_element = soup.find("span", class_="money-amount__main")
+        if price_element:
+            price = price_element.text.strip()
+        else:
+            price = "Price not found"
+
     
     finally:
         driver.quit()
+
+    return (product_name, price)
 
 
 @bot.tree.command(name="monitor", description="Start monitoring a Zara product")
@@ -133,14 +201,17 @@ async def monitor(interaction: discord.Interaction, url: str, role: discord.Role
             return
 
     try:
-        item_name = get_item_name(url)
+        item_name = get_item_info(url)[0]
+        item_price = get_item_info(url)[1]
 
-        monitor = ZaraMonitor.ZaraMonitor(url, item_name)
+        monitor = zaraMonitor.ZaraMonitor(url, item_name)
         await monitor.initialize()
         bot.monitors[interaction.channel_id].append(monitor)
 
-        monitor_task = MonitorTask(bot, interaction.channel_id, monitor, item_name, role, img_link)
+        monitor_task = MonitorTask(bot, interaction.channel_id, monitor, item_name, role, img_link, item_price)
         bot.monitor_tasks[interaction.channel_id].append(monitor_task)
+
+        bot.save_monitors()
 
         await interaction.response.send_message(f"Started monitoring product: {url}")
     except Exception as e:
@@ -167,6 +238,8 @@ async def stop(interaction: discord.Interaction, index: int = None):
             removed_monitor = bot.monitors[interaction.channel_id].pop(index - 1)
             removed_task = bot.monitor_tasks[interaction.channel_id].pop(index - 1)
             removed_task.task.cancel()
+
+            bot.save_monitors()
 
             await interaction.response.send_message(f"Stopped monitoring product: {removed_monitor.URL}")
 
